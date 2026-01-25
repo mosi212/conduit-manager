@@ -645,19 +645,19 @@ print_header() {
 }
 
 print_live_stats_header() {
-    echo -e "${CYAN}"
-    echo "╔═══════════════════════════════════════════════════════════════════╗"
-    echo "║                    CONDUIT LIVE STATISTICS                        ║"
-    echo "╠═══════════════════════════════════════════════════════════════════╣"
-    printf "║  Max Clients: ${GREEN}%-52s${CYAN}║\n" "${MAX_CLIENTS}"
+    local EL="\033[K"
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${EL}"
+    echo -e "║                    CONDUIT LIVE STATISTICS                        ║${EL}"
+    echo -e "╠═══════════════════════════════════════════════════════════════════╣${EL}"
+    printf "║  Max Clients: ${GREEN}%-52s${CYAN}║${EL}\n" "${MAX_CLIENTS}"
     if [ "$BANDWIDTH" == "-1" ]; then
-        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "Unlimited"
+        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║${EL}\n" "Unlimited"
     else
-        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "${BANDWIDTH} Mbps"
+        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║${EL}\n" "${BANDWIDTH} Mbps"
     fi
-    echo "║                                                                   ║"
-    echo "╚═══════════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo -e "║                                                                   ║${EL}"
+    echo -e "╚═══════════════════════════════════════════════════════════════════╝${EL}"
+    echo -e "${NC}\033[K"
 }
 
 
@@ -685,15 +685,10 @@ show_dashboard() {
     clear
 
     while [ $stop_dashboard -eq 0 ]; do
-        # Move cursor to top-left (0,0) and clear screen
-        # Using both tput and ANSI codes for maximum compatibility
+        # Move cursor to top-left (0,0)
+        # We NO LONGER clear the screen here to avoid the "full black" flash
         if ! tput cup 0 0 2>/dev/null; then
             printf "\033[H"
-        fi
-        
-        # Clear from cursor to end of screen (Erase Down)
-        if ! tput ed 2>/dev/null; then
-            printf "\033[J"
         fi
         
         print_live_stats_header
@@ -705,10 +700,16 @@ show_dashboard() {
         if [ -n "$node_id" ]; then
             echo -e "${CYAN}═══ CONDUIT ID ═══${NC}\033[K"
             echo -e "  ${CYAN}${node_id}${NC}\033[K"
-            echo ""
+            echo -e "\033[K"
         fi
 
         echo -e "${BOLD}Refreshes every 5 seconds. Press any key to return to menu...${NC}\033[K"
+        
+        # Clear any leftover lines below the dashboard content (Erase to End of Display)
+        # This only cleans up if the dashboard gets shorter
+        if ! tput ed 2>/dev/null; then
+            printf "\033[J"
+        fi
         
         # Wait 4 seconds for keypress (compensating for processing time)
         # Redirect from /dev/tty ensures it works when the script is piped
@@ -870,43 +871,43 @@ show_status() {
             connecting=${connecting:-0}
             connected=${connected:-0}
             
-            echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
-            echo -e "${NC}"
+            echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}${EL}"
+            echo -e "${NC}${EL}"
             
             if [ -n "$uptime" ]; then
-                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC} (${uptime})  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting"
+                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC} (${uptime})  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting${EL}"
             else
-                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting"
+                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting${EL}"
             fi
             
-            echo ""
-            echo -e "${CYAN}═══ Traffic ═══${NC}"
-            [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}"
-            [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}"
+            echo -e "${EL}"
+            echo -e "${CYAN}═══ Traffic ═══${NC}${EL}"
+            [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}${EL}"
+            [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}${EL}"
             
-            echo ""
-            echo -e "${CYAN}═══ Resource Usage ═══${NC}"
-            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "App:" "$app_cpu_display" "$app_ram"
-            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
-            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
+            echo -e "${EL}"
+            echo -e "${CYAN}═══ Resource Usage ═══${NC}${EL}"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "App:" "$app_cpu_display" "$app_ram"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
             
         else
-             echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
-             echo -e "${NC}"
-             echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}"
-             echo ""
-             echo -e "${CYAN}═══ Resource Usage ═══${NC}"
-             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "App:" "$app_cpu_display" "$app_ram"
-             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
-             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
-             echo ""
-             echo -e "  Stats:        ${YELLOW}Waiting for first stats...${NC}"
+             echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}${EL}"
+             echo -e "${NC}${EL}"
+             echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}${EL}"
+             echo -e "${EL}"
+             echo -e "${CYAN}═══ Resource Usage ═══${NC}${EL}"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "App:" "$app_cpu_display" "$app_ram"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
+             echo -e "${EL}"
+             echo -e "  Stats:        ${YELLOW}Waiting for first stats...${NC}${EL}"
         fi
         
     else
-        echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
-        echo -e "${NC}"
-        echo -e "${BOLD}Status:${NC} ${RED}Stopped${NC}"
+        echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}${EL}"
+        echo -e "${NC}${EL}"
+        echo -e "${BOLD}Status:${NC} ${RED}Stopped${NC}${EL}"
     fi
     
 
