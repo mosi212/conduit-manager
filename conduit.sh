@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # ╔═══════════════════════════════════════════════════════════════════╗
-# ║        🚀 PSIPHON CONDUIT MANAGER v1.0.0                          ║
+# ║        🚀 PSIPHON CONDUIT MANAGER v1.0.1                          ║
 # ║                                                                   ║
 # ║  One-click setup for Psiphon Conduit                              ║
 # ║                                                                   ║
@@ -16,10 +16,10 @@
 # Usage:
 # curl -sL https://raw.githubusercontent.com/SamNet-dev/conduit-manager/main/conduit.sh | sudo bash
 #
-# Reference: https://github.com/ssmirr/conduit/releases/tag/87cc1a3
+# Reference: https://github.com/ssmirr/conduit/releases/tag/d8522a8
 # Conduit CLI options:
 #   -m, --max-clients int   maximum number of proxy clients (1-1000) (default 200)
-#   -b, --bandwidth float   bandwidth limit per peer in Mbps (1-40) (default 5)
+#   -b, --bandwidth float   bandwidth limit per peer in Mbps (1-40, or -1 for unlimited) (default 5)
 #   -v, --verbose           increase verbosity (-v for verbose, -vv for debug)
 #
 
@@ -31,8 +31,8 @@ if [ -z "$BASH_VERSION" ]; then
     exit 1
 fi
 
-VERSION="1.0.0"
-CONDUIT_IMAGE="ghcr.io/ssmirr/conduit/conduit:87cc1a3"
+VERSION="1.0.1"
+CONDUIT_IMAGE="ghcr.io/ssmirr/conduit/conduit:d8522a8"
 INSTALL_DIR="/opt/conduit"
 FORCE_REINSTALL=false
 
@@ -43,7 +43,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 #═══════════════════════════════════════════════════════════════════════
 # Utility Functions
@@ -52,9 +52,9 @@ NC='\033[0m' # No Color
 print_header() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════════════════════════════╗"
-    echo "║                🚀 PSIPHON CONDUIT MANAGER v${VERSION}                ║"
+    echo "║                🚀 PSIPHON CONDUIT MANAGER v${VERSION}                  ║"
     echo "╠═══════════════════════════════════════════════════════════════════╣"
-    echo "║  Help users access the open internet during shutdowns            ║"
+    echo "║  Help users access the open internet during shutdowns             ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -89,7 +89,7 @@ detect_os() {
     HAS_SYSTEMD=false
     PKG_MANAGER="unknown"
     
-    # Detect OS from /etc/os-release (most modern distros)
+    # Detect OS from /etc/os-release
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS="$ID"
@@ -180,7 +180,7 @@ install_package() {
 }
 
 check_dependencies() {
-    # Check for bash (Alpine uses ash by default)
+    # Check for bash
     if [ "$OS_FAMILY" = "alpine" ]; then
         if ! command -v bash &>/dev/null; then
             log_info "Installing bash (required for this script)..."
@@ -202,7 +202,7 @@ check_dependencies() {
         esac
     fi
     
-    # Check for free command (part of procps)
+    # Check for free command
     if ! command -v free &>/dev/null; then
         case "$PKG_MANAGER" in
             apt|dnf|yum) install_package procps ;;
@@ -213,13 +213,13 @@ check_dependencies() {
     fi
 }
 
-get_ram_gb() {
-    # Get RAM in GB, minimum 1 for safety
+get_ram_mb() {
+    # Get RAM in MB
     local ram=""
     
     # Try free command first
     if command -v free &>/dev/null; then
-        ram=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}')
+        ram=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
     fi
     
     # Fallback: parse /proc/meminfo
@@ -227,7 +227,7 @@ get_ram_gb() {
         if [ -f /proc/meminfo ]; then
             local kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
             if [ -n "$kb" ]; then
-                ram=$((kb / 1024 / 1024))
+                ram=$((kb / 1024))
             fi
         fi
     fi
@@ -240,17 +240,30 @@ get_ram_gb() {
     fi
 }
 
-calculate_recommended_clients() {
-    local ram_gb=$(get_ram_gb)
+get_cpu_cores() {
+    local cores=1
+    if command -v nproc &>/dev/null; then
+        cores=$(nproc)
+    elif [ -f /proc/cpuinfo ]; then
+        cores=$(grep -c ^processor /proc/cpuinfo)
+    fi
     
-    if [ "$ram_gb" -ge 8 ]; then
-        echo 1000
-    elif [ "$ram_gb" -ge 4 ]; then
-        echo 700
-    elif [ "$ram_gb" -ge 2 ]; then
-        echo 400
+    # Safety check
+    if [ -z "$cores" ] || [ "$cores" -lt 1 ] 2>/dev/null; then
+        echo 1
     else
-        echo 200
+        echo "$cores"
+    fi
+}
+
+calculate_recommended_clients() {
+    local cores=$(get_cpu_cores)
+    # Logic: 100 clients per CPU core, max 1000
+    local recommended=$((cores * 100))
+    if [ "$recommended" -gt 1000 ]; then
+        echo 1000
+    else
+        echo "$recommended"
     fi
 }
 
@@ -259,7 +272,8 @@ calculate_recommended_clients() {
 #═══════════════════════════════════════════════════════════════════════
 
 prompt_settings() {
-    local ram_gb=$(get_ram_gb)
+    local ram_mb=$(get_ram_mb)
+    local cpu_cores=$(get_cpu_cores)
     local recommended=$(calculate_recommended_clients)
     
     echo ""
@@ -268,12 +282,18 @@ prompt_settings() {
     echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "  ${BOLD}Server Info:${NC}"
-    echo -e "    RAM: ${GREEN}${ram_gb}GB${NC}"
+    echo -e "    CPU Cores: ${GREEN}${cpu_cores}${NC}"
+    if [ "$ram_mb" -ge 1000 ]; then
+        local ram_gb=$(awk "BEGIN {printf \"%.1f\", $ram_mb/1024}")
+        echo -e "    RAM: ${GREEN}${ram_gb} GB${NC}"
+    else
+        echo -e "    RAM: ${GREEN}${ram_mb} MB${NC}"
+    fi
     echo -e "    Recommended max-clients: ${GREEN}${recommended}${NC}"
     echo ""
     echo -e "  ${BOLD}Conduit Options:${NC}"
     echo -e "    ${YELLOW}--max-clients${NC}  Maximum proxy clients (1-1000)"
-    echo -e "    ${YELLOW}--bandwidth${NC}    Bandwidth per peer in Mbps (1-40)"
+    echo -e "    ${YELLOW}--bandwidth${NC}    Bandwidth per peer in Mbps (1-40, or -1 for unlimited)"
     echo ""
     
     # Max clients prompt
@@ -296,34 +316,49 @@ prompt_settings() {
     
     # Bandwidth prompt
     echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
-    echo -e "  Enter bandwidth per peer in Mbps (1-40)"
-    echo -e "  Press Enter for default: ${GREEN}5${NC} Mbps"
+    echo -e "  Do you want to set ${BOLD}UNLIMITED${NC} bandwidth? (Recommended for servers)"
+    echo -e "  ${YELLOW}Note: High bandwidth usage may attract attention.${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
-    read -p "  bandwidth: " input_bandwidth < /dev/tty || true
-    
-    if [ -z "$input_bandwidth" ]; then
-        BANDWIDTH=5
-    elif [[ "$input_bandwidth" =~ ^[0-9]+$ ]] && [ "$input_bandwidth" -ge 1 ] && [ "$input_bandwidth" -le 40 ]; then
-        BANDWIDTH=$input_bandwidth
-    elif [[ "$input_bandwidth" =~ ^[0-9]*\.[0-9]+$ ]]; then
-        # Handle decimal - validate the whole number is in range
-        local float_ok=$(awk -v val="$input_bandwidth" 'BEGIN { print (val >= 1 && val <= 40) ? "yes" : "no" }')
-        if [ "$float_ok" = "yes" ]; then
+    read -p "  Set unlimited bandwidth? [y/N] " unlimited_bw < /dev/tty || true
+
+    if [[ "$unlimited_bw" =~ ^[Yy] ]]; then
+        BANDWIDTH="-1"
+        echo -e "  Selected: ${GREEN}Unlimited (-1)${NC}"
+    else
+        echo ""
+        echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
+        echo -e "  Enter bandwidth per peer in Mbps (1-40)"
+        echo -e "  Press Enter for default: ${GREEN}5${NC} Mbps"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
+        read -p "  bandwidth: " input_bandwidth < /dev/tty || true
+        
+        if [ -z "$input_bandwidth" ]; then
+            BANDWIDTH=5
+        elif [[ "$input_bandwidth" =~ ^[0-9]+$ ]] && [ "$input_bandwidth" -ge 1 ] && [ "$input_bandwidth" -le 40 ]; then
             BANDWIDTH=$input_bandwidth
+        elif [[ "$input_bandwidth" =~ ^[0-9]*\.[0-9]+$ ]]; then
+            local float_ok=$(awk -v val="$input_bandwidth" 'BEGIN { print (val >= 1 && val <= 40) ? "yes" : "no" }')
+            if [ "$float_ok" = "yes" ]; then
+                BANDWIDTH=$input_bandwidth
+            else
+                log_warn "Invalid input. Using default: 5 Mbps"
+                BANDWIDTH=5
+            fi
         else
             log_warn "Invalid input. Using default: 5 Mbps"
             BANDWIDTH=5
         fi
-    else
-        log_warn "Invalid input. Using default: 5 Mbps"
-        BANDWIDTH=5
     fi
     
     echo ""
     echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
     echo -e "  ${BOLD}Your Settings:${NC}"
     echo -e "    Max Clients: ${GREEN}${MAX_CLIENTS}${NC}"
-    echo -e "    Bandwidth:   ${GREEN}${BANDWIDTH}${NC} Mbps"
+    if [ "$BANDWIDTH" == "-1" ]; then
+        echo -e "    Bandwidth:   ${GREEN}Unlimited${NC}"
+    else
+        echo -e "    Bandwidth:   ${GREEN}${BANDWIDTH}${NC} Mbps"
+    fi
     echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
     echo ""
     
@@ -345,13 +380,13 @@ install_docker() {
     
     log_info "Installing Docker..."
     
-    # Alpine uses a different method
+    # Alpine
     if [ "$OS_FAMILY" = "alpine" ]; then
         apk add --no-cache docker docker-cli-compose 2>/dev/null
         rc-update add docker boot 2>/dev/null || true
         service docker start 2>/dev/null || rc-service docker start 2>/dev/null || true
     else
-        # Use official Docker install script for most distros
+        # Use official Docker install
         curl -fsSL https://get.docker.com | sh
         
         # Enable and start Docker
@@ -371,7 +406,7 @@ install_docker() {
         fi
     fi
     
-    # Wait for Docker to be ready (up to 30 seconds for slow systems)
+    # Wait for Docker to be ready
     sleep 3
     local retries=27
     while ! docker info &>/dev/null && [ $retries -gt 0 ]; do
@@ -393,8 +428,8 @@ run_conduit() {
     # Stop existing container
     docker rm -f conduit 2>/dev/null || true
     
-    # Pull latest image
-    log_info "Pulling Conduit image from ghcr.io/ssmirr/conduit..."
+    # Pull image 
+    log_info "Pulling Conduit image ($CONDUIT_IMAGE)..."
     if ! docker pull $CONDUIT_IMAGE; then
         log_error "Failed to pull Conduit image. Check your internet connection."
         exit 1
@@ -413,7 +448,11 @@ run_conduit() {
     
     if docker ps | grep -q conduit; then
         log_success "Conduit container is running"
-        log_success "Settings: max-clients=$MAX_CLIENTS, bandwidth=${BANDWIDTH}Mbps"
+        if [ "$BANDWIDTH" == "-1" ]; then
+            log_success "Settings: max-clients=$MAX_CLIENTS, bandwidth=Unlimited"
+        else
+            log_success "Settings: max-clients=$MAX_CLIENTS, bandwidth=${BANDWIDTH}Mbps"
+        fi
     else
         log_error "Conduit failed to start"
         docker logs conduit 2>&1 | tail -10
@@ -430,7 +469,6 @@ MAX_CLIENTS=$MAX_CLIENTS
 BANDWIDTH=$BANDWIDTH
 EOF
     
-    # Verify write succeeded
     if [ ! -f "$INSTALL_DIR/settings.conf" ]; then
         log_error "Failed to save settings. Check disk space and permissions."
         return 1
@@ -546,12 +584,12 @@ create_management_script() {
 #!/bin/bash
 #
 # Psiphon Conduit Manager
-# Reference: https://github.com/ssmirr/conduit/releases/tag/87cc1a3
+# Reference: https://github.com/ssmirr/conduit/releases/tag/d8522a8
 #
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 INSTALL_DIR="/opt/conduit"
-CONDUIT_IMAGE="ghcr.io/ssmirr/conduit/conduit:87cc1a3"
+CONDUIT_IMAGE="ghcr.io/ssmirr/conduit/conduit:d8522a8"
 
 # Colors
 RED='\033[0;31m'
@@ -601,7 +639,7 @@ fi
 print_header() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════════════════════════════╗"
-    printf "║                🚀 PSIPHON CONDUIT MANAGER v%-5s              ║\n" "${VERSION}"
+    printf "║                🚀 PSIPHON CONDUIT MANAGER v%-5s                  ║\n" "${VERSION}"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -612,30 +650,26 @@ print_live_stats_header() {
     echo "║                    CONDUIT LIVE STATISTICS                        ║"
     echo "╠═══════════════════════════════════════════════════════════════════╣"
     printf "║  Max Clients: ${GREEN}%-52s${CYAN}║\n" "${MAX_CLIENTS}"
-    printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "${BANDWIDTH} Mbps"
+    if [ "$BANDWIDTH" == "-1" ]; then
+        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "Unlimited"
+    else
+        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "${BANDWIDTH} Mbps"
+    fi
     echo "║                                                                   ║"
-    echo "║  Press Ctrl+C to exit                                             ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
 
-get_container_resources() {
-    # Get CPU and memory usage from docker stats
-    if docker ps 2>/dev/null | grep -q "[[:space:]]conduit$"; then
-        local stats=$(docker stats conduit --no-stream --format "{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}" 2>/dev/null)
-        if [ -n "$stats" ]; then
-            CPU_USAGE=$(echo "$stats" | cut -d'|' -f1)
-            MEM_USAGE=$(echo "$stats" | cut -d'|' -f2)
-            MEM_PERC=$(echo "$stats" | cut -d'|' -f3)
-        else
-            CPU_USAGE="N/A"
-            MEM_USAGE="N/A"
-            MEM_PERC="N/A"
+
+
+get_node_id() {
+    if docker volume inspect conduit-data >/dev/null 2>&1; then
+        local mountpoint=$(docker volume inspect conduit-data --format '{{ .Mountpoint }}')
+        if [ -f "$mountpoint/conduit_key.json" ]; then
+            # Extract privateKeyBase64, decode, take last 32 bytes, encode base64
+            # Logic provided by user
+            cat "$mountpoint/conduit_key.json" | grep "privateKeyBase64" | awk -F'"' '{print $4}' | base64 -d 2>/dev/null | tail -c 32 | base64 | tr -d '=\n'
         fi
-    else
-        CPU_USAGE="N/A"
-        MEM_USAGE="N/A"
-        MEM_PERC="N/A"
     fi
 }
 
@@ -658,20 +692,23 @@ show_dashboard() {
         
         show_status "live"
         
-        # Get and show resource usage
-        get_container_resources
-        echo ""
-        echo -e "${CYAN}═══ RESOURCE USAGE ═══${NC}\033[K"
-        echo -e "  CPU:          ${YELLOW}${CPU_USAGE}${NC}\033[K"
-        echo -e "  Memory:       ${YELLOW}${MEM_USAGE}${NC} (${MEM_PERC})\033[K"
-        echo ""
-        echo -e "${BOLD}Refreshes every 10 seconds. Press any key to return to menu...${NC}\033[K"
+        # System Resource Usage is now part of show_status
+        
+        # Show Node ID in its own section
+        local node_id=$(get_node_id)
+        if [ -n "$node_id" ]; then
+            echo -e "${CYAN}═══ CONDUIT ID ═══${NC}\033[K"
+            echo -e "  ${CYAN}${node_id}${NC}\033[K"
+            echo ""
+        fi
+
+        echo -e "${BOLD}Refreshes every 5 seconds. Press any key to return to menu...${NC}\033[K"
         
         # Clear any leftover content below (Erase Down)
         tput ed 2>/dev/null || true
         
-        # Wait 10 seconds for keypress. Signal will interrupt this read.
-        if read -t 10 -n 1; then
+        # Wait 4 seconds for keypress (compensating for processing time)
+        if read -t 4 -n 1; then
             stop_dashboard=1
         fi
     done
@@ -682,13 +719,94 @@ show_dashboard() {
     trap - SIGINT SIGTERM # Reset traps
 }
 
+get_container_stats() {
+    # Get CPU and RAM usage for conduit container
+    # Returns: "CPU_PERCENT RAM_USAGE"
+    local stats=$(docker stats --no-stream --format "{{.CPUPerc}} {{.MemUsage}}" conduit 2>/dev/null)
+    if [ -z "$stats" ]; then
+        echo "0% 0MiB"
+    else
+        # Extract just the raw numbers/units, simpler format
+        echo "$stats"
+    fi
+}
+
+get_cpu_cores() {
+    local cores=1
+    if command -v nproc &>/dev/null; then
+        cores=$(nproc)
+    elif [ -f /proc/cpuinfo ]; then
+        cores=$(grep -c ^processor /proc/cpuinfo)
+    fi
+    if [ -z "$cores" ] || [ "$cores" -lt 1 ] 2>/dev/null; then echo 1; else echo "$cores"; fi
+}
+
+get_system_stats() {
+    # Get System CPU (Live Delta) and RAM
+    # Returns: "CPU_PERCENT RAM_USED RAM_TOTAL RAM_PCT"
+    
+    # 1. System CPU (Live Delta)
+    local sys_cpu="0%"
+    if [ -f /proc/stat ]; then
+        # Read 1
+        read -r cpu user nice system idle iowait irq softirq steal guest < /proc/stat
+        local total1=$((user + nice + system + idle + iowait + irq + softirq + steal))
+        local work1=$((user + nice + system + irq + softirq + steal))
+        
+        sleep 0.1
+        
+        # Read 2
+        read -r cpu user nice system idle iowait irq softirq steal guest < /proc/stat
+        local total2=$((user + nice + system + idle + iowait + irq + softirq + steal))
+        local work2=$((user + nice + system + irq + softirq + steal))
+        
+        local total_delta=$((total2 - total1))
+        local work_delta=$((work2 - work1))
+        
+        if [ "$total_delta" -gt 0 ]; then
+            local cpu_usage=$((work_delta * 100 / total_delta))
+            sys_cpu="${cpu_usage}%"
+        fi
+    else
+        sys_cpu="N/A"
+    fi
+    
+    # 2. System RAM (Used, Total, Percentage)
+    local sys_ram_used="N/A"
+    local sys_ram_total="N/A"
+    local sys_ram_pct="N/A"
+    
+    if command -v free &>/dev/null; then
+        # Output: used total percentage
+        local ram_data=$(free -m 2>/dev/null | awk '/^Mem:/{printf "%s %s %.2f%%", $3, $2, ($3/$2)*100}')
+        local ram_human=$(free -h 2>/dev/null | awk '/^Mem:/{print $3 " " $2}')
+        
+        sys_ram_used=$(echo "$ram_human" | awk '{print $1}')
+        sys_ram_total=$(echo "$ram_human" | awk '{print $2}')
+        sys_ram_pct=$(echo "$ram_data" | awk '{print $3}')
+    fi
+    
+    echo "$sys_cpu $sys_ram_used $sys_ram_total $sys_ram_pct"
+}
+
 show_live_stats() {
     print_header
     echo -e "${YELLOW}Reading traffic history...${NC}"
-    echo -e "${CYAN}Press Ctrl+C to return to menu${NC}"
+    echo -e "${CYAN}Press ANY KEY to return to menu${NC}"
     echo ""
+    
+    # Run logs in background
     # Stream logs, filter for [STATS], and strip everything before [STATS]
-    docker logs -f --tail 200 conduit 2>&1 | grep --line-buffered "\[STATS\]" | sed -u -e 's/.*\[STATS\]/[STATS]/'
+    # Tail 2500 to reliably capture stats (performance cost is negligible)
+    docker logs -f --tail 2500 conduit 2>&1 | grep --line-buffered "\[STATS\]" | sed -u -e 's/.*\[STATS\]/[STATS]/' &
+    local cmd_pid=$!
+    
+    # Wait for any key press
+    read -n 1 -s -r
+    
+    # Kill the background process
+    kill $cmd_pid 2>/dev/null
+    wait $cmd_pid 2>/dev/null
 }
 
 show_status() {
@@ -699,45 +817,103 @@ show_status() {
     fi
 
     echo ""
-    echo -e "${CYAN}═══ CONDUIT STATUS ═══${NC}${EL}"
+
     
     if docker ps 2>/dev/null | grep -q "[[:space:]]conduit$"; then
-        if [ -n "$stats" ]; then
-            local stats=$(docker logs --tail 1000 conduit 2>&1 | grep "STATS" | tail -1)
+        # Fetch stats once
+        local logs=$(docker logs --tail 1000 conduit 2>&1 | grep "STATS" | tail -1)
+        
+        # Get Resource Stats
+        local stats=$(get_container_stats)
+        
+        # Normalize App CPU (Docker % / Cores)
+        local raw_app_cpu=$(echo "$stats" | awk '{print $1}' | tr -d '%')
+        local num_cores=$(get_cpu_cores)
+        local app_cpu="0%"
+        local app_cpu_display=""
+        
+        if [[ "$raw_app_cpu" =~ ^[0-9.]+$ ]]; then
+             # Use awk for floating point math
+             app_cpu=$(awk -v cpu="$raw_app_cpu" -v cores="$num_cores" 'BEGIN {printf "%.2f%%", cpu / cores}')
+             if [ "$num_cores" -gt 1 ]; then
+                 app_cpu_display="${app_cpu} (${raw_app_cpu}% vCPU)"
+             else
+                 app_cpu_display="${app_cpu}"
+             fi
         else
-             local stats=$(docker logs --tail 1000 conduit 2>&1 | grep "STATS" | tail -1)
+             app_cpu="${raw_app_cpu}%"
+             app_cpu_display="${app_cpu}"
         fi
         
-        if [ -n "$stats" ]; then
-            local connecting=$(echo "$stats" | sed -n 's/.*Connecting:[[:space:]]*\([0-9]*\).*/\1/p')
-            local connected=$(echo "$stats" | sed -n 's/.*Connected:[[:space:]]*\([0-9]*\).*/\1/p')
-            local upload=$(echo "$stats" | sed -n 's/.*Up:[[:space:]]*\([^|]*\).*/\1/p' | xargs)
-            local download=$(echo "$stats" | sed -n 's/.*Down:[[:space:]]*\([^|]*\).*/\1/p' | xargs)
-            local uptime=$(echo "$stats" | sed -n 's/.*Uptime:[[:space:]]*\(.*\)/\1/p' | xargs)
-            
-            [ -n "$uptime" ] && echo -e "  Container:    ${GREEN}Running${NC} (${CYAN}Uptime: ${uptime}${NC})${EL}" || echo -e "  Container:    ${GREEN}Running${NC}${EL}"
+        # Keep full "Used / Limit" string for App RAM
+        local app_ram=$(echo "$stats" | awk '{print $2, $3, $4}') 
+        
+        local sys_stats=$(get_system_stats)
+        local sys_cpu=$(echo "$sys_stats" | awk '{print $1}')
+        local sys_ram_used=$(echo "$sys_stats" | awk '{print $2}')
+        local sys_ram_total=$(echo "$sys_stats" | awk '{print $3}')
+        local sys_ram_pct=$(echo "$sys_stats" | awk '{print $4}')
+        
+        if [ -n "$logs" ]; then
+            local connecting=$(echo "$logs" | sed -n 's/.*Connecting:[[:space:]]*\([0-9]*\).*/\1/p')
+            local connected=$(echo "$logs" | sed -n 's/.*Connected:[[:space:]]*\([0-9]*\).*/\1/p')
+            local upload=$(echo "$logs" | sed -n 's/.*Up:[[:space:]]*\([^|]*\).*/\1/p' | xargs)
+            local download=$(echo "$logs" | sed -n 's/.*Down:[[:space:]]*\([^|]*\).*/\1/p' | xargs)
+            local uptime=$(echo "$logs" | sed -n 's/.*Uptime:[[:space:]]*\(.*\)/\1/p' | xargs)
             
             # Default to 0 if missing/empty
             connecting=${connecting:-0}
             connected=${connected:-0}
             
-            echo -e "  Clients:      ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting${EL}"
+            echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
+            echo -e "${NC}"
             
-            [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}${EL}"
-            [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}${EL}"
+            if [ -n "$uptime" ]; then
+                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC} (${uptime})  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting"
+            else
+                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting"
+            fi
+            
+            echo ""
+            echo -e "${CYAN}═══ Traffic ═══${NC}"
+            [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}"
+            [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}"
+            
+            echo ""
+            echo -e "${CYAN}═══ Resource Usage ═══${NC}"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "App:" "$app_cpu_display" "$app_ram"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
+            
         else
-            echo -e "  Container:    ${GREEN}Running${NC}${EL}"
-            echo -e "  Stats:        ${YELLOW}Waiting for first stats...${NC}${EL}"
+             echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
+             echo -e "${NC}"
+             echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}"
+             echo ""
+             echo -e "${CYAN}═══ Resource Usage ═══${NC}"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "App:" "$app_cpu_display" "$app_ram"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
+             echo ""
+             echo -e "  Stats:        ${YELLOW}Waiting for first stats...${NC}"
         fi
         
     else
-        echo -e "  Container:    ${RED}Stopped${NC}${EL}"
+        echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
+        echo -e "${NC}"
+        echo -e "${BOLD}Status:${NC} ${RED}Stopped${NC}"
     fi
+    
+
     
     echo ""
     echo -e "${CYAN}═══ SETTINGS ═══${NC}${EL}"
     echo -e "  Max Clients:  ${MAX_CLIENTS}${EL}"
-    echo -e "  Bandwidth:    ${BANDWIDTH} Mbps${EL}"
+    if [ "$BANDWIDTH" == "-1" ]; then
+        echo -e "  Bandwidth:    Unlimited${EL}"
+    else
+        echo -e "  Bandwidth:    ${BANDWIDTH} Mbps${EL}"
+    fi
 
     
     echo ""
@@ -812,11 +988,33 @@ change_settings() {
     echo ""
     echo -e "${CYAN}Current Settings:${NC}"
     echo -e "  Max Clients: ${MAX_CLIENTS}"
-    echo -e "  Bandwidth:   ${BANDWIDTH} Mbps"
+    if [ "$BANDWIDTH" == "-1" ]; then
+        echo -e "  Bandwidth:   Unlimited"
+    else
+        echo -e "  Bandwidth:   ${BANDWIDTH} Mbps"
+    fi
     echo ""
     
     read -p "New max-clients (1-1000) [${MAX_CLIENTS}]: " new_clients < /dev/tty || true
-    read -p "New bandwidth in Mbps (1-40) [${BANDWIDTH}]: " new_bandwidth < /dev/tty || true
+
+    
+    # Bandwidth prompt logic for settings menu
+    echo ""
+    if [ "$BANDWIDTH" == "-1" ]; then
+        echo "Current bandwidth: Unlimited"
+    else
+        echo "Current bandwidth: ${BANDWIDTH} Mbps"
+    fi
+    read -p "Set unlimited bandwidth (-1)? [y/N]: " set_unlimited < /dev/tty || true
+    
+    if [[ "$set_unlimited" =~ ^[Yy] ]]; then
+        new_bandwidth="-1"
+    else
+        read -p "New bandwidth in Mbps (1-40) [${BANDWIDTH}]: " input_bw < /dev/tty || true
+        if [ -n "$input_bw" ]; then
+            new_bandwidth="$input_bw"
+        fi
+    fi
     
     # Validate max-clients
     if [ -n "$new_clients" ]; then
@@ -829,7 +1027,9 @@ change_settings() {
     
     # Validate bandwidth
     if [ -n "$new_bandwidth" ]; then
-        if [[ "$new_bandwidth" =~ ^[0-9]+$ ]] && [ "$new_bandwidth" -ge 1 ] && [ "$new_bandwidth" -le 40 ]; then
+        if [ "$new_bandwidth" = "-1" ]; then
+             BANDWIDTH="-1"
+        elif [[ "$new_bandwidth" =~ ^[0-9]+$ ]] && [ "$new_bandwidth" -ge 1 ] && [ "$new_bandwidth" -le 40 ]; then
             BANDWIDTH=$new_bandwidth
         elif [[ "$new_bandwidth" =~ ^[0-9]*\.[0-9]+$ ]]; then
             local float_ok=$(awk -v val="$new_bandwidth" 'BEGIN { print (val >= 1 && val <= 40) ? "yes" : "no" }')
@@ -866,7 +1066,11 @@ EOF
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Settings updated and Conduit restarted${NC}"
         echo -e "  Max Clients: ${MAX_CLIENTS}"
-        echo -e "  Bandwidth:   ${BANDWIDTH} Mbps"
+        if [ "$BANDWIDTH" == "-1" ]; then
+            echo -e "  Bandwidth:   Unlimited"
+        else
+            echo -e "  Bandwidth:   ${BANDWIDTH} Mbps"
+        fi
     else
         echo -e "${RED}✗ Failed to restart Conduit${NC}"
     fi
@@ -957,7 +1161,7 @@ show_menu() {
             echo -e "${CYAN}─────────────────────────────────────────────────────────────────${NC}"
             echo -e "${CYAN}  MANAGEMENT OPTIONS${NC}"
             echo -e "${CYAN}─────────────────────────────────────────────────────────────────${NC}"
-            echo -e "  1. 📈 View status dashboard (Live CPU/RAM)"
+            echo -e "  1. 📈 View status dashboard"
             echo -e "  2. 📜 View traffic history (Scrolling Logs)"
             echo -e "  3. 📋 View raw logs (Filtered)"
             echo -e "  4. ⚙️  Change settings (max-clients, bandwidth)"
@@ -1059,7 +1263,7 @@ esac
 MANAGEMENT
 
     chmod +x $INSTALL_DIR/conduit
-    # Force create symlink (remove existing first)
+    # Force create symlink
     rm -f /usr/local/bin/conduit 2>/dev/null || true
     ln -s $INSTALL_DIR/conduit /usr/local/bin/conduit
     
@@ -1071,7 +1275,6 @@ MANAGEMENT
 #═══════════════════════════════════════════════════════════════════════
 
 print_summary() {
-    # Determine which init system was used
     local init_type="Enabled"
     if [ "$HAS_SYSTEMD" = "true" ]; then
         init_type="Enabled (systemd)"
@@ -1085,22 +1288,26 @@ print_summary() {
     echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║                    ✅ INSTALLATION COMPLETE!                      ║${NC}"
     echo -e "${GREEN}╠═══════════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${GREEN}║${NC}  Conduit is running and ready to help users!                     ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  Conduit is running and ready to help users!                      ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}                                                                   ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  📊 Settings:                                                     ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}     Max Clients: ${CYAN}${MAX_CLIENTS}${NC}                                            ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}     Bandwidth:   ${CYAN}${BANDWIDTH} Mbps${NC}                                          ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}     Auto-start:  ${CYAN}${init_type}${NC}                                ${GREEN}║${NC}"
+    printf "${GREEN}║${NC}     Max Clients: ${CYAN}%-4s${NC}                                             ${GREEN}║${NC}\n" "${MAX_CLIENTS}"
+    if [ "$BANDWIDTH" == "-1" ]; then
+        echo -e "${GREEN}║${NC}     Bandwidth:   ${CYAN}Unlimited${NC}                                        ${GREEN}║${NC}"
+    else
+        printf "${GREEN}║${NC}     Bandwidth:   ${CYAN}%-4s${NC} Mbps                                        ${GREEN}║${NC}\n" "${BANDWIDTH}"
+    fi
+    printf "${GREEN}║${NC}     Auto-start:  ${CYAN}%-20s${NC}                             ${GREEN}║${NC}\n" "${init_type}"
     echo -e "${GREEN}║${NC}                                                                   ${GREEN}║${NC}"
     echo -e "${GREEN}╠═══════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║${NC}  COMMANDS:                                                        ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}                                                                   ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}conduit${NC}               # Open management menu                   ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}conduit stats${NC}         # View live statistics + CPU/RAM         ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}conduit status${NC}        # Quick status with resource usage       ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}conduit logs${NC}          # View raw logs                          ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}conduit settings${NC}      # Change max-clients/bandwidth           ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  ${CYAN}conduit uninstall${NC}     # Remove everything                      ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}conduit${NC}               # Open management menu                    ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}conduit stats${NC}         # View live statistics + CPU/RAM          ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}conduit status${NC}        # Quick status with resource usage        ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}conduit logs${NC}          # View raw logs                           ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}conduit settings${NC}      # Change max-clients/bandwidth            ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  ${CYAN}conduit uninstall${NC}     # Remove everything                       ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}                                                                   ${GREEN}║${NC}"
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -1246,7 +1453,6 @@ main() {
             2)
                 echo ""
                 log_info "Starting fresh reinstall..."
-                # Continue with installation below
                 ;;
             3)
                 uninstall
@@ -1294,13 +1500,12 @@ main() {
     
     print_summary
     
-    # Ask if user wants to view live stats
-    read -p "View live statistics now? [Y/n] " view_stats < /dev/tty || true
+        read -p "View live statistics now? [Y/n] " view_stats < /dev/tty || true
     if [[ ! "$view_stats" =~ ^[Nn] ]]; then
         /opt/conduit/conduit stats
     fi
 }
 #
-# REACHED END OF SCRIPT - VERSION 1.0.0
+# REACHED END OF SCRIPT - VERSION 1.0.1
 # ###############################################################################
 main "$@"
