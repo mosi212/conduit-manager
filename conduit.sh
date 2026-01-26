@@ -33,7 +33,7 @@ fi
 
 VERSION="1.0.1"
 CONDUIT_IMAGE="ghcr.io/ssmirr/conduit/conduit:d8522a8"
-INSTALL_DIR="/opt/conduit"
+INSTALL_DIR="${INSTALL_DIR:-/opt/conduit}"
 FORCE_REINSTALL=false
 
 # Colors
@@ -146,6 +146,11 @@ detect_os() {
     fi
     
     log_info "Detected: $OS ($OS_FAMILY family), Package manager: $PKG_MANAGER"
+
+    if command -v podman &>/dev/null && ! command -v docker &>/dev/null; then
+        log_warn "Podman detected. This script is optimized for Docker."
+        log_warn "If installation fails, consider installing 'docker-ce' manually."
+    fi
 }
 
 install_package() {
@@ -154,23 +159,54 @@ install_package() {
     
     case "$PKG_MANAGER" in
         apt)
-            apt-get update -qq 2>/dev/null
-            apt-get install -y -qq "$package" 2>/dev/null
+            # Make update failure non-fatal but log it
+            apt-get update -q || log_warn "apt-get update failed, attempting to install regardless..."
+            if apt-get install -y -q "$package"; then
+                log_success "$package installed successfully"
+            else
+                log_error "Failed to install $package"
+                return 1
+            fi
             ;;
         dnf)
-            dnf install -y -q "$package" 2>/dev/null
+            if dnf install -y -q "$package"; then
+                log_success "$package installed successfully"
+            else
+                log_error "Failed to install $package"
+                return 1
+            fi
             ;;
         yum)
-            yum install -y -q "$package" 2>/dev/null
+            if yum install -y -q "$package"; then
+                log_success "$package installed successfully"
+            else
+                log_error "Failed to install $package"
+                return 1
+            fi
             ;;
         pacman)
-            pacman -Sy --noconfirm "$package" 2>/dev/null
+            if pacman -Sy --noconfirm "$package"; then
+                log_success "$package installed successfully"
+            else
+                log_error "Failed to install $package"
+                return 1
+            fi
             ;;
         zypper)
-            zypper install -y -n "$package" 2>/dev/null
+            if zypper install -y -n "$package"; then
+                log_success "$package installed successfully"
+            else
+                log_error "Failed to install $package"
+                return 1
+            fi
             ;;
         apk)
-            apk add --no-cache "$package" 2>/dev/null
+            if apk add --no-cache "$package"; then
+                log_success "$package installed successfully"
+            else
+                log_error "Failed to install $package"
+                return 1
+            fi
             ;;
         *)
             log_warn "Unknown package manager. Please install $package manually."
@@ -196,19 +232,56 @@ check_dependencies() {
     # Check for basic tools
     if ! command -v awk &>/dev/null; then
         case "$PKG_MANAGER" in
-            apt) install_package gawk ;;
-            apk) install_package gawk ;;
-            *) install_package awk ;;
+            apt) install_package gawk || log_warn "Could not install gawk" ;;
+            apk) install_package gawk || log_warn "Could not install gawk" ;;
+            *) install_package awk || log_warn "Could not install awk" ;;
         esac
     fi
     
     # Check for free command
     if ! command -v free &>/dev/null; then
         case "$PKG_MANAGER" in
-            apt|dnf|yum) install_package procps ;;
-            pacman) install_package procps-ng ;;
-            zypper) install_package procps ;;
-            apk) install_package procps ;;
+            apt|dnf|yum) install_package procps || log_warn "Could not install procps" ;;
+            pacman) install_package procps-ng || log_warn "Could not install procps" ;;
+            zypper) install_package procps || log_warn "Could not install procps" ;;
+            apk) install_package procps || log_warn "Could not install procps" ;;
+        esac
+    fi
+
+    # Check for tput (ncurses)
+    if ! command -v tput &>/dev/null; then
+        case "$PKG_MANAGER" in
+            apt) install_package ncurses-bin || log_warn "Could not install ncurses-bin" ;;
+            apk) install_package ncurses || log_warn "Could not install ncurses" ;;
+            *) install_package ncurses || log_warn "Could not install ncurses" ;;
+        esac
+    fi
+
+    # Check for tcpdump
+    if ! command -v tcpdump &>/dev/null; then
+        install_package tcpdump || log_warn "Could not install tcpdump automatically"
+    fi
+
+    # Check for GeoIP tools
+    if ! command -v geoiplookup &>/dev/null; then
+        case "$PKG_MANAGER" in
+            apt) 
+                # geoip-bin is becoming legacy in some Ubuntu versions, but still works in many.
+                # If it fails, we warn but don't stop the whole script if other things work.
+                install_package geoip-bin || log_warn "Could not install geoip-bin. Live peer map may not show countries."
+                ;;
+            dnf|yum) 
+                # On RHEL/CentOS
+                if ! rpm -q epel-release &>/dev/null; then
+                    log_info "Enabling EPEL repository for GeoIP..."
+                    $PKG_MANAGER install -y epel-release &>/dev/null || true
+                fi
+                install_package GeoIP || log_warn "Could not install GeoIP."
+                ;;
+            pacman) install_package geoip || log_warn "Could not install geoip." ;;
+            zypper) install_package GeoIP || log_warn "Could not install GeoIP." ;;
+            apk) install_package geoip || log_warn "Could not install geoip." ;;
+            *) log_warn "Could not install geoiplookup automatically" ;;
         esac
     fi
 }
@@ -380,6 +453,13 @@ install_docker() {
     
     log_info "Installing Docker..."
     
+    # Check OS family for specific requirements
+    if [ "$OS_FAMILY" = "rhel" ]; then
+        log_info "Installing RHEL-specific Docker dependencies..."
+        $PKG_MANAGER install -y -q dnf-plugins-core 2>/dev/null || true
+        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+    fi
+
     # Alpine
     if [ "$OS_FAMILY" = "alpine" ]; then
         apk add --no-cache docker docker-cli-compose 2>/dev/null
@@ -387,7 +467,11 @@ install_docker() {
         service docker start 2>/dev/null || rc-service docker start 2>/dev/null || true
     else
         # Use official Docker install
-        curl -fsSL https://get.docker.com | sh
+        if ! curl -fsSL https://get.docker.com | sh; then
+            log_error "Official Docker installation script failed."
+            log_info "Try installing docker manually: https://docs.docker.com/engine/install/"
+            return 1
+        fi
         
         # Enable and start Docker
         if [ "$HAS_SYSTEMD" = "true" ]; then
@@ -425,7 +509,14 @@ install_docker() {
 run_conduit() {
     log_info "Starting Conduit container..."
     
-    # Stop existing container
+    # Check for existing conduit containers (any image containing conduit)
+    local existing=$(docker ps -a --filter "ancestor=ghcr.io/ssmirr/conduit/conduit" --format "{{.Names}}")
+    if [ -n "$existing" ] && [ "$existing" != "conduit" ]; then
+        log_warn "Detected other Conduit containers: $existing"
+        log_warn "Running multiple instances may cause port conflicts."
+    fi
+
+    # Stop existing container with our name
     docker rm -f conduit 2>/dev/null || true
     
     # Pull image 
@@ -461,7 +552,7 @@ run_conduit() {
 }
 
 save_settings() {
-    mkdir -p $INSTALL_DIR
+    mkdir -p "$INSTALL_DIR"
     
     # Save settings
     cat > "$INSTALL_DIR/settings.conf" << EOF
@@ -482,7 +573,8 @@ setup_autostart() {
     
     if [ "$HAS_SYSTEMD" = "true" ]; then
         # Systemd-based systems
-        cat > /etc/systemd/system/conduit.service << 'EOF'
+        local docker_path=$(command -v docker)
+        cat > /etc/systemd/system/conduit.service << EOF
 [Unit]
 Description=Psiphon Conduit Service
 After=network.target docker.service
@@ -491,8 +583,8 @@ Requires=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/docker start conduit
-ExecStop=/usr/bin/docker stop conduit
+ExecStart=$docker_path start conduit
+ExecStop=$docker_path stop conduit
 
 [Install]
 WantedBy=multi-user.target
@@ -580,7 +672,10 @@ EOF
 #═══════════════════════════════════════════════════════════════════════
 
 create_management_script() {
-    cat > $INSTALL_DIR/conduit << 'MANAGEMENT'
+    # Generate the management script. 
+    # Note: We use a placeholder for INSTALL_DIR that we'll replace with sed
+    # to avoid complex escaping in the heredoc while keeping it dynamic.
+    cat > "$INSTALL_DIR/conduit" << 'MANAGEMENT'
 #!/bin/bash
 #
 # Psiphon Conduit Manager
@@ -588,7 +683,7 @@ create_management_script() {
 #
 
 VERSION="1.0.1"
-INSTALL_DIR="/opt/conduit"
+INSTALL_DIR="REPLACE_ME_INSTALL_DIR"
 CONDUIT_IMAGE="ghcr.io/ssmirr/conduit/conduit:d8522a8"
 
 # Colors
@@ -603,6 +698,12 @@ NC='\033[0m'
 [ -f "$INSTALL_DIR/settings.conf" ] && source "$INSTALL_DIR/settings.conf"
 MAX_CLIENTS=${MAX_CLIENTS:-200}
 BANDWIDTH=${BANDWIDTH:-5}
+
+# Ensure we're running as root
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Error: This command must be run as root (use sudo conduit)${NC}"
+    exit 1
+fi
 
 # Check if Docker is available
 check_docker() {
@@ -645,19 +746,19 @@ print_header() {
 }
 
 print_live_stats_header() {
-    echo -e "${CYAN}"
-    echo "╔═══════════════════════════════════════════════════════════════════╗"
-    echo "║                    CONDUIT LIVE STATISTICS                        ║"
-    echo "╠═══════════════════════════════════════════════════════════════════╣"
-    printf "║  Max Clients: ${GREEN}%-52s${CYAN}║\n" "${MAX_CLIENTS}"
+    local EL="\033[K"
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${EL}"
+    echo -e "║                    CONDUIT LIVE STATISTICS                        ║${EL}"
+    echo -e "╠═══════════════════════════════════════════════════════════════════╣${EL}"
+    printf "║  Max Clients: ${GREEN}%-52s${CYAN}║${EL}\n" "${MAX_CLIENTS}"
     if [ "$BANDWIDTH" == "-1" ]; then
-        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "Unlimited"
+        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║${EL}\n" "Unlimited"
     else
-        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║\n" "${BANDWIDTH} Mbps"
+        printf "║  Bandwidth:   ${GREEN}%-52s${CYAN}║${EL}\n" "${BANDWIDTH} Mbps"
     fi
-    echo "║                                                                   ║"
-    echo "╚═══════════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo -e "║                                                                   ║${EL}"
+    echo -e "╚═══════════════════════════════════════════════════════════════════╝${EL}"
+    echo -e "${NC}\033[K"
 }
 
 
@@ -685,30 +786,35 @@ show_dashboard() {
     clear
 
     while [ $stop_dashboard -eq 0 ]; do
-        # Move cursor to top-left (0,0) instead of just home escape code
-        tput cup 0 0 2>/dev/null || echo -ne "\033[H"
+        # Move cursor to top-left (0,0)
+        # We NO LONGER clear the screen here to avoid the "full black" flash
+        if ! tput cup 0 0 2>/dev/null; then
+            printf "\033[H"
+        fi
         
         print_live_stats_header
         
         show_status "live"
-        
-        # System Resource Usage is now part of show_status
         
         # Show Node ID in its own section
         local node_id=$(get_node_id)
         if [ -n "$node_id" ]; then
             echo -e "${CYAN}═══ CONDUIT ID ═══${NC}\033[K"
             echo -e "  ${CYAN}${node_id}${NC}\033[K"
-            echo ""
+            echo -e "\033[K"
         fi
 
         echo -e "${BOLD}Refreshes every 5 seconds. Press any key to return to menu...${NC}\033[K"
         
-        # Clear any leftover content below (Erase Down)
-        tput ed 2>/dev/null || true
+        # Clear any leftover lines below the dashboard content (Erase to End of Display)
+        # This only cleans up if the dashboard gets shorter
+        if ! tput ed 2>/dev/null; then
+            printf "\033[J"
+        fi
         
         # Wait 4 seconds for keypress (compensating for processing time)
-        if read -t 4 -n 1; then
+        # Redirect from /dev/tty ensures it works when the script is piped
+        if read -t 4 -n 1 -s <> /dev/tty 2>/dev/null; then
             stop_dashboard=1
         fi
     done
@@ -745,28 +851,30 @@ get_system_stats() {
     # Get System CPU (Live Delta) and RAM
     # Returns: "CPU_PERCENT RAM_USED RAM_TOTAL RAM_PCT"
     
-    # 1. System CPU (Live Delta)
+    # 1. System CPU (Stateful Average)
     local sys_cpu="0%"
+    local cpu_tmp="/tmp/conduit_cpu_state"
+    
     if [ -f /proc/stat ]; then
-        # Read 1
         read -r cpu user nice system idle iowait irq softirq steal guest < /proc/stat
-        local total1=$((user + nice + system + idle + iowait + irq + softirq + steal))
-        local work1=$((user + nice + system + irq + softirq + steal))
+        local total_curr=$((user + nice + system + idle + iowait + irq + softirq + steal))
+        local work_curr=$((user + nice + system + irq + softirq + steal))
         
-        sleep 0.1
-        
-        # Read 2
-        read -r cpu user nice system idle iowait irq softirq steal guest < /proc/stat
-        local total2=$((user + nice + system + idle + iowait + irq + softirq + steal))
-        local work2=$((user + nice + system + irq + softirq + steal))
-        
-        local total_delta=$((total2 - total1))
-        local work_delta=$((work2 - work1))
-        
-        if [ "$total_delta" -gt 0 ]; then
-            local cpu_usage=$((work_delta * 100 / total_delta))
-            sys_cpu="${cpu_usage}%"
+        if [ -f "$cpu_tmp" ]; then
+            read -r total_prev work_prev < "$cpu_tmp"
+            local total_delta=$((total_curr - total_prev))
+            local work_delta=$((work_curr - work_prev))
+            
+            if [ "$total_delta" -gt 0 ]; then
+                local cpu_usage=$(awk -v w="$work_delta" -v t="$total_delta" 'BEGIN { printf "%.1f", w * 100 / t }' 2>/dev/null || echo 0)
+                sys_cpu="${cpu_usage}%"
+            fi
+        else
+            sys_cpu="Calc..." # First run calibration
         fi
+        
+        # Save current state for next run
+        echo "$total_curr $work_curr" > "$cpu_tmp"
     else
         sys_cpu="N/A"
     fi
@@ -801,12 +909,166 @@ show_live_stats() {
     docker logs -f --tail 2500 conduit 2>&1 | grep --line-buffered "\[STATS\]" | sed -u -e 's/.*\[STATS\]/[STATS]/' &
     local cmd_pid=$!
     
-    # Wait for any key press
-    read -n 1 -s -r
+    # Trap Ctrl+C (SIGINT) to set a flag instead of exiting script
+    local stop_logs=0
+    trap 'stop_logs=1' SIGINT
+
+    # Wait for any key press (Polling) OR Ctrl+C
+    while kill -0 $cmd_pid 2>/dev/null; do
+        if [ "$stop_logs" -eq 1 ]; then
+            break
+        fi
+        if read -t 0.2 -n 1 -s -r < /dev/tty 2>/dev/null; then
+            break
+        fi
+    done
     
     # Kill the background process
     kill $cmd_pid 2>/dev/null
     wait $cmd_pid 2>/dev/null
+    
+    # Reset Trap
+    trap - SIGINT
+}
+
+show_peers() {
+    local stop_peers=0
+    trap 'stop_peers=1' SIGINT SIGTERM
+    
+    # Check dependencies again in case they were removed
+    if ! command -v tcpdump &>/dev/null || ! command -v geoiplookup &>/dev/null; then
+        echo -e "${RED}Error: tcpdump or geoiplookup not found!${NC}"
+        echo "Please re-run the main installer to fix dependencies."
+        read -n 1 -s -r -p "Press any key to return..." < /dev/tty || true
+        return 1
+    fi
+
+    # Detect primary interface and local IP to filter it out
+    local iface="any"
+    local local_ip=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}')
+    [ -z "$local_ip" ] && local_ip=$(hostname -I | awk '{print $1}')
+    
+    tput smcup 2>/dev/null || true
+    echo -ne "\033[?25l" # Hide cursor
+    clear
+
+    while [ $stop_peers -eq 0 ]; do
+        if ! tput cup 0 0 2>/dev/null; then printf "\033[H"; fi
+        # Clear screen from cursor down to prevent ghosting from previous updates
+        tput ed 2>/dev/null || printf "\033[J"
+        
+        # Header Section
+        echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "║                    LIVE NETWORK ACTIVITY BY COUNTRY               ║"
+        echo -e "${CYAN}╠═══════════════════════════════════════════════════════════════════╣${NC}"
+        if [ -f /tmp/conduit_peers_current ]; then
+            local update_time=$(date '+%H:%M:%S')
+            # 1(║)+2(sp)+13(Last Update: )+8(time)+36(sp)+6([LIVE])+2(sp)+1(║) = 69 total
+            echo -e "║  Last Update: ${update_time}                                    ${GREEN}[LIVE]${NC}  ║"
+        else
+            echo -e "║  Status: ${YELLOW}Initial setup...${NC}                                         ║"
+        fi
+        echo -e "${CYAN}╚═══════════════════════════════════════════════════════════════════╝${NC}"
+        echo -e ""
+        
+        # Data Table Section
+        if [ -s /tmp/conduit_peers_current ]; then
+            echo -e "${BOLD}   Count | Country${NC}"
+            echo -e "   ──────|──────────────────────────────────────"
+            while read -r line; do
+                local p_count=$(echo "$line" | awk '{print $1}')
+                local country=$(echo "$line" | cut -d' ' -f2-)
+                # Pad country to prevent wrapping/junk
+                printf "   ${GREEN}%5s${NC} | ${CYAN}%-40s${NC}\n" "$p_count" "$country"
+            done < /tmp/conduit_peers_current
+        else
+            echo -e "   ${YELLOW}Waiting for first snapshot... (High traffic helps speed this up)${NC}"
+            for i in {1..8}; do echo ""; done
+        fi
+        
+        echo -e ""
+        echo -e "${CYAN}─────────────────────────────────────────────────────────────────────${NC}"
+        
+        # Background capture starts here
+        # Removed -c limit to ensure we respect the 14s timeout even on high traffic
+        timeout 14 tcpdump -ni $iface '(tcp or udp)' 2>/dev/null | \
+            grep ' IP ' | \
+            sed -nE 's/.* IP ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})(\.[0-9]+)?[ >].*/\1/p' | \
+            grep -vE "^($local_ip|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|0\.|169\.254\.)" | \
+            sort -u | \
+            xargs -n1 geoiplookup 2>/dev/null | \
+            awk -F: '/Country Edition/{print $2}' | \
+            sed 's/^ // ' | \
+            sed 's/Iran, Islamic Republic of/Iran - #FreeIran/' | \
+            sed 's/IP Address not found/Unknown\/Local/' | \
+            sort | \
+            uniq -c | \
+            sort -nr | \
+            head -20 > /tmp/conduit_peers_next 2>/dev/null &
+        
+        local tcpdump_pid=$!
+        
+        # Indicator Loop
+        local count=0
+        while kill -0 $tcpdump_pid 2>/dev/null; do
+            if read -t 1 -n 1 -s <> /dev/tty 2>/dev/null; then
+                stop_peers=1
+                kill $tcpdump_pid 2>/dev/null
+                break
+            fi
+            count=$((count + 1))
+            [ $count -gt 14 ] && count=1
+            echo -ne "\r  [${YELLOW}"
+            for ((i=0; i<count; i++)); do echo -n "•"; done
+            for ((i=count; i<14; i++)); do echo -n " "; done
+            echo -ne "${NC}] Capturing next update... (Any key to exit) \033[K"
+        done
+        
+        if [ $stop_peers -eq 1 ]; then break; fi
+        
+        # Move next to current
+        mv /tmp/conduit_peers_next /tmp/conduit_peers_current 2>/dev/null
+
+        echo -ne "\r  ${GREEN}✓ Update complete! Refreshing...${NC} \033[K"
+        sleep 1
+    done
+    
+    echo -ne "\033[?25h" # Show cursor
+    tput rmcup 2>/dev/null || true
+    rm -f /tmp/conduit_peers_current /tmp/conduit_peers_next
+    rm -f /tmp/conduit_peers_current /tmp/conduit_peers_next
+    trap - SIGINT SIGTERM
+}
+
+get_net_speed() {
+    # Calculate System Network Speed (Active 0.5s Sample)
+    # Returns: "RX_MBPS TX_MBPS"
+    local iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $5}')
+    [ -z "$iface" ] && iface=$(ip route list default 2>/dev/null | awk '{print $5}')
+    
+    if [ -n "$iface" ] && [ -f "/sys/class/net/$iface/statistics/rx_bytes" ]; then
+        local rx1=$(cat /sys/class/net/$iface/statistics/rx_bytes)
+        local tx1=$(cat /sys/class/net/$iface/statistics/tx_bytes)
+        
+        sleep 0.5
+        
+        local rx2=$(cat /sys/class/net/$iface/statistics/rx_bytes)
+        local tx2=$(cat /sys/class/net/$iface/statistics/tx_bytes)
+        
+        # Calculate Delta (Bytes)
+        local rx_delta=$((rx2 - rx1))
+        local tx_delta=$((tx2 - tx1))
+        
+        # Convert to Mbps: (bytes * 8 bits) / (0.5 sec * 1,000,000)
+        # Formula simplified: bytes * 16 / 1000000
+        
+        local rx_mbps=$(awk -v b="$rx_delta" 'BEGIN { printf "%.2f", (b * 16) / 1000000 }')
+        local tx_mbps=$(awk -v b="$tx_delta" 'BEGIN { printf "%.2f", (b * 16) / 1000000 }')
+        
+        echo "$rx_mbps $tx_mbps"
+    else
+        echo "0.00 0.00"
+    fi
 }
 
 show_status() {
@@ -854,6 +1116,14 @@ show_status() {
         local sys_ram_total=$(echo "$sys_stats" | awk '{print $3}')
         local sys_ram_pct=$(echo "$sys_stats" | awk '{print $4}')
         
+        local sys_ram_pct=$(echo "$sys_stats" | awk '{print $4}')
+        
+        # New Metric: Network Speed (System Wide)
+        local net_speed=$(get_net_speed)
+        local rx_mbps=$(echo "$net_speed" | awk '{print $1}')
+        local tx_mbps=$(echo "$net_speed" | awk '{print $2}')
+        local net_display="↓ ${rx_mbps} Mbps  ↑ ${tx_mbps} Mbps"
+        
         if [ -n "$logs" ]; then
             local connecting=$(echo "$logs" | sed -n 's/.*Connecting:[[:space:]]*\([0-9]*\).*/\1/p')
             local connected=$(echo "$logs" | sed -n 's/.*Connected:[[:space:]]*\([0-9]*\).*/\1/p')
@@ -865,43 +1135,43 @@ show_status() {
             connecting=${connecting:-0}
             connected=${connected:-0}
             
-            echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
-            echo -e "${NC}"
+            echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}${EL}"
+            echo -e "${NC}${EL}"
             
             if [ -n "$uptime" ]; then
-                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC} (${uptime})  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting"
+                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC} (${uptime})  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting${EL}"
             else
-                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting"
+                 echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}  |  ${BOLD}Clients:${NC} ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting${EL}"
             fi
             
-            echo ""
-            echo -e "${CYAN}═══ Traffic ═══${NC}"
-            [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}"
-            [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}"
+            echo -e "${EL}"
+            echo -e "${CYAN}═══ Traffic ═══${NC}${EL}"
+            [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}${EL}"
+            [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}${EL}"
             
-            echo ""
-            echo -e "${CYAN}═══ Resource Usage ═══${NC}"
-            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "App:" "$app_cpu_display" "$app_ram"
-            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
-            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
+            echo -e "${EL}"
+            echo -e "${CYAN}═══ Resource Usage ═══${NC}${EL}"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "App:" "$app_cpu_display" "$app_ram"
+            printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
+            printf "  %-8s Net: ${YELLOW}%-43s${NC}${EL}\n" "Total:" "$net_display"
             
         else
-             echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
-             echo -e "${NC}"
-             echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}"
-             echo ""
-             echo -e "${CYAN}═══ Resource Usage ═══${NC}"
-             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "App:" "$app_cpu_display" "$app_ram"
-             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
-             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}\n" "Total:" "$sys_cpu" "$sys_ram_pct"
-             echo ""
-             echo -e "  Stats:        ${YELLOW}Waiting for first stats...${NC}"
+             echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}${EL}"
+             echo -e "${NC}${EL}"
+             echo -e "${BOLD}Status:${NC} ${GREEN}Running${NC}${EL}"
+             echo -e "${EL}"
+             echo -e "${CYAN}═══ Resource Usage ═══${NC}${EL}"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "App:" "$app_cpu_display" "$app_ram"
+             printf "  %-8s CPU: ${YELLOW}%-20s${NC} | RAM: ${YELLOW}%-20s${NC}${EL}\n" "System:" "$sys_cpu" "$sys_ram_used / $sys_ram_total"
+             printf "  %-8s Net: ${YELLOW}%-43s${NC}${EL}\n" "Total:" "$net_display"
+             echo -e "${EL}"
+             echo -e "  Stats:        ${YELLOW}Waiting for first stats...${NC}${EL}"
         fi
         
     else
-        echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}"
-        echo -e "${NC}"
-        echo -e "${BOLD}Status:${NC} ${RED}Stopped${NC}"
+        echo -e "🚀 PSIPHON CONDUIT MANAGER v${VERSION}${EL}"
+        echo -e "${NC}${EL}"
+        echo -e "${BOLD}Status:${NC} ${RED}Stopped${NC}${EL}"
     fi
     
 
@@ -1044,7 +1314,7 @@ change_settings() {
     fi
     
     # Save settings
-    cat > $INSTALL_DIR/settings.conf << EOF
+    cat > "$INSTALL_DIR/settings.conf" << EOF
 MAX_CLIENTS=$MAX_CLIENTS
 BANDWIDTH=$BANDWIDTH
 EOF
@@ -1109,19 +1379,19 @@ uninstall_all() {
     fi
     
     echo ""
-    echo "[INFO] Stopping Conduit container..."
+    echo -e "${BLUE}[INFO]${NC} Stopping Conduit container..."
     docker stop conduit 2>/dev/null || true
     
-    echo "[INFO] Removing Conduit container..."
+    echo -e "${BLUE}[INFO]${NC} Removing Conduit container..."
     docker rm -f conduit 2>/dev/null || true
     
-    echo "[INFO] Removing Conduit Docker image..."
-    docker rmi $CONDUIT_IMAGE 2>/dev/null || true
+    echo -e "${BLUE}[INFO]${NC} Removing Conduit Docker image..."
+    docker rmi "$CONDUIT_IMAGE" 2>/dev/null || true
     
-    echo "[INFO] Removing Conduit data volume..."
+    echo -e "${BLUE}[INFO]${NC} Removing Conduit data volume..."
     docker volume rm conduit-data 2>/dev/null || true
     
-    echo "[INFO] Removing auto-start service..."
+    echo -e "${BLUE}[INFO]${NC} Removing auto-start service..."
     # Systemd
     systemctl stop conduit.service 2>/dev/null || true
     systemctl disable conduit.service 2>/dev/null || true
@@ -1135,8 +1405,8 @@ uninstall_all() {
     chkconfig conduit off 2>/dev/null || true
     rm -f /etc/init.d/conduit
     
-    echo "[INFO] Removing configuration files..."
-    rm -rf /opt/conduit
+    echo -e "${BLUE}[INFO]${NC} Removing configuration files..."
+    rm -rf "$INSTALL_DIR"
     rm -f /usr/local/bin/conduit
     
     echo ""
@@ -1146,8 +1416,7 @@ uninstall_all() {
     echo ""
     echo "Conduit and all related components have been removed."
     echo ""
-    echo "Note: Docker itself was NOT removed. To remove Docker:"
-    echo "  apt-get purge docker-ce docker-ce-cli containerd.io"
+    echo "Note: Docker itself was NOT removed."
     echo ""
 }
 
@@ -1170,6 +1439,8 @@ show_menu() {
             echo -e "  6. ⏹️  Stop Conduit"
             echo -e "  7. 🔁 Restart Conduit"
             echo ""
+            echo -e "  8. 🌍 View live peers by country (Live Map)"
+            echo ""
             echo -e "  u. 🗑️  Uninstall (remove everything)"
             echo -e "  0. 🚪 Exit"
             echo -e "${CYAN}─────────────────────────────────────────────────────────────────${NC}"
@@ -1186,7 +1457,6 @@ show_menu() {
                 ;;
             2)
                 show_live_stats
-                read -n 1 -s -r -p "Press any key to return..." < /dev/tty || true
                 redraw=true
                 ;;
             3)
@@ -1212,6 +1482,10 @@ show_menu() {
                 read -n 1 -s -r -p "Press any key to return..." < /dev/tty || true
                 redraw=true
                 ;;
+            8)
+                show_peers
+                redraw=true
+                ;;
             u)
                 uninstall_all
                 exit 0
@@ -1225,7 +1499,7 @@ show_menu() {
                 ;;
             *)
                 echo -e "${RED}Invalid choice: ${NC}${YELLOW}$choice${NC}"
-                echo -e "${CYAN}Choose an option from 0-7, or 'u' to uninstall.${NC}"
+                echo -e "${CYAN}Choose an option from 0-8, or 'u' to uninstall.${NC}"
                 ;;
         esac
     done
@@ -1255,6 +1529,7 @@ case "${1:-menu}" in
     start)    start_conduit ;;
     stop)     stop_conduit ;;
     restart)  restart_conduit ;;
+    peers)    show_peers ;;
     settings) change_settings ;;
     uninstall) uninstall_all ;;
     help|-h|--help) show_help ;;
@@ -1262,10 +1537,14 @@ case "${1:-menu}" in
 esac
 MANAGEMENT
 
-    chmod +x $INSTALL_DIR/conduit
+    # Patch the INSTALL_DIR in the generated script
+    # Use # as delimiter to avoid issues if path contains /
+    sed -i "s#REPLACE_ME_INSTALL_DIR#$INSTALL_DIR#g" "$INSTALL_DIR/conduit"
+    
+    chmod +x "$INSTALL_DIR/conduit"
     # Force create symlink
     rm -f /usr/local/bin/conduit 2>/dev/null || true
-    ln -s $INSTALL_DIR/conduit /usr/local/bin/conduit
+    ln -s "$INSTALL_DIR/conduit" /usr/local/bin/conduit
     
     log_success "Management script installed: conduit"
 }
@@ -1320,11 +1599,10 @@ print_summary() {
 #═══════════════════════════════════════════════════════════════════════
 
 uninstall() {
-    echo -e "${CYAN}"
-    echo "╔═══════════════════════════════════════════════════════════════════╗"
+    echo ""
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════════════╗${NC}"
     echo "║                    ⚠️  UNINSTALL CONDUIT                          ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
     echo ""
     echo "This will completely remove:"
     echo "  • Conduit Docker container"
@@ -1351,7 +1629,7 @@ uninstall() {
     docker rm -f conduit 2>/dev/null || true
     
     log_info "Removing Conduit Docker image..."
-    docker rmi ghcr.io/ssmirr/conduit/conduit:latest 2>/dev/null || true
+    docker rmi "$CONDUIT_IMAGE" 2>/dev/null || true
     
     log_info "Removing Conduit data volume..."
     docker volume rm conduit-data 2>/dev/null || true
@@ -1371,7 +1649,7 @@ uninstall() {
     rm -f /etc/init.d/conduit
     
     log_info "Removing configuration files..."
-    rm -rf /opt/conduit
+    rm -rf "$INSTALL_DIR"
     rm -f /usr/local/bin/conduit
     
     echo ""
@@ -1381,8 +1659,7 @@ uninstall() {
     echo ""
     echo "Conduit and all related components have been removed."
     echo ""
-    echo "Note: Docker itself was NOT removed. To remove Docker:"
-    echo "  apt-get purge docker-ce docker-ce-cli containerd.io"
+    echo "Note: Docker itself was NOT removed."
     echo ""
 }
 
@@ -1431,6 +1708,9 @@ main() {
     check_root
     detect_os
     
+    # Ensure all tools (including new ones like tcpdump) are present
+    check_dependencies
+    
     # Check if already installed
     if [ -f "$INSTALL_DIR/conduit" ] && [ "$FORCE_REINSTALL" != "true" ]; then
         echo -e "${GREEN}Conduit is already installed!${NC}"
@@ -1448,7 +1728,7 @@ main() {
             1)
                 echo -e "${CYAN}Opening management menu...${NC}"
                 create_management_script >/dev/null 2>&1
-                exec /opt/conduit/conduit menu
+                exec "$INSTALL_DIR/conduit" menu
                 ;;
             2)
                 echo ""
@@ -1471,9 +1751,6 @@ main() {
         esac
     fi
 
-    
-    check_dependencies
-    
     # Interactive settings prompt
     prompt_settings
     
@@ -1502,7 +1779,7 @@ main() {
     
         read -p "View live statistics now? [Y/n] " view_stats < /dev/tty || true
     if [[ ! "$view_stats" =~ ^[Nn] ]]; then
-        /opt/conduit/conduit stats
+        "$INSTALL_DIR/conduit" stats
     fi
 }
 #
