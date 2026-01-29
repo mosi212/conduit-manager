@@ -196,7 +196,7 @@ Conduit node operators can earn OAT tokens for contributing to the Psiphon netwo
 1. **Install the Ryve app** on your phone 
 2. **Create a crypto wallet** within the app
 3. **Link your Conduit containers** by scanning the QR code:
-   - From the menu: **Option 6 → Show QR Code & Conduit ID**
+   - From the menu: Select Settings & Tools **Option 6 → Show QR Code & Conduit ID**
    - From Manage Containers: press **[q]** to display QR code
    - CLI: `conduit qr`
 4. **Scan the QR code** with the Ryve app to link your node
@@ -368,7 +368,7 @@ conduit help         # راهنما
 1. **اپلیکیشن Ryve** را روی گوشی نصب کنید
 2. **یک کیف پول کریپتو** در اپلیکیشن بسازید
 3. **کانتینرهای خود را لینک کنید** با اسکن QR کد:
-   - از منو: **گزینه ۶ ← نمایش QR کد و شناسه کاندوییت**
+   - از منو تنظیمات: **گزینه ۶ ← نمایش QR کد و شناسه کاندوییت**
    - از مدیریت کانتینرها: کلید **[q]** را بزنید
    - CLI: `conduit qr`
 4. **QR کد را اسکن کنید** با اپلیکیشن Ryve تا نود شما لینک شود
