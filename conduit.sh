@@ -1217,7 +1217,7 @@ show_dashboard() {
             fi
 
             # Print side by side
-            printf "  ${GREEN}${BOLD}%-30s${NC} ${YELLOW}${BOLD}%s${NC}\033[K\n" "ACTIVE CLIENTS" "TOP 5 UPLOAD"
+            printf "  ${GREEN}${BOLD}%-30s${NC} ${YELLOW}${BOLD}%s${NC}\033[K\n" "ACTIVE CLIENTS" "TOP 5 UPLOAD (cumulative)"
             local max_rows=${#left_lines[@]}
             [ ${#right_lines[@]} -gt $max_rows ] && max_rows=${#right_lines[@]}
             for ((ri=0; ri<max_rows; ri++)); do
@@ -2505,7 +2505,7 @@ show_status() {
             echo -e "  Containers: ${GREEN}${running_count}${NC}/${CONTAINER_COUNT}    Clients: ${GREEN}${connected}${NC} connected, ${YELLOW}${connecting}${NC} connecting${EL}"
 
             echo -e "${EL}"
-            echo -e "${CYAN}═══ Traffic ═══${NC}${EL}"
+            echo -e "${CYAN}═══ Traffic (current session) ═══${NC}${EL}"
             [ -n "$upload" ] && echo -e "  Upload:       ${CYAN}${upload}${NC}${EL}"
             [ -n "$download" ] && echo -e "  Download:     ${CYAN}${download}${NC}${EL}"
 
