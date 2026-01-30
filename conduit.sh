@@ -4179,15 +4179,18 @@ telegram_build_report() {
         fi
     fi
 
-    # Connected peers (use awk like show_status does)
+    # Connected peers + connecting (matching TUI format)
     local total_peers=0
+    local total_connecting=0
     for i in $(seq 1 ${CONTAINER_COUNT:-1}); do
         local cname=$(get_container_name $i)
-        local last_stat=$(docker logs --tail 50 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
+        local last_stat=$(docker logs --tail 400 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
         local peers=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connected:") print $(j+1)+0}}' | head -1)
+        local cing=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connecting:") print $(j+1)+0}}' | head -1)
         total_peers=$((total_peers + ${peers:-0}))
+        total_connecting=$((total_connecting + ${cing:-0}))
     done
-    report+="👥 Peers: ${total_peers} connected"
+    report+="👥 Clients: ${total_peers} connected, ${total_connecting} connecting"
     report+=$'\n'
 
     # CPU / RAM (normalize CPU by core count like dashboard)
@@ -4461,7 +4464,7 @@ No Conduit containers are running\\!"
     local total_peers=0
     for i in $(seq 1 ${CONTAINER_COUNT:-1}); do
         local cname=$(get_container_name $i)
-        local last_stat=$(timeout 5 docker logs --tail 50 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
+        local last_stat=$(timeout 5 docker logs --tail 400 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
         local peers=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connected:") print $(j+1)+0}}' | head -1)
         total_peers=$((total_peers + ${peers:-0}))
     done
@@ -4485,7 +4488,7 @@ record_snapshot() {
     local total_peers=0
     for i in $(seq 1 ${CONTAINER_COUNT:-1}); do
         local cname=$(get_container_name $i)
-        local last_stat=$(docker logs --tail 50 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
+        local last_stat=$(docker logs --tail 400 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
         local peers=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connected:") print $(j+1)+0}}' | head -1)
         total_peers=$((total_peers + ${peers:-0}))
     done
@@ -4625,13 +4628,16 @@ except Exception:
                 ;;
             /peers|/peers@*)
                 local total_peers=0
+                local total_cing=0
                 for i in $(seq 1 ${CONTAINER_COUNT:-1}); do
                     local cname=$(get_container_name $i)
-                    local last_stat=$(timeout 5 docker logs --tail 50 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
+                    local last_stat=$(timeout 5 docker logs --tail 400 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
                     local peers=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connected:") print $(j+1)+0}}' | head -1)
+                    local cing=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connecting:") print $(j+1)+0}}' | head -1)
                     total_peers=$((total_peers + ${peers:-0}))
+                    total_cing=$((total_cing + ${cing:-0}))
                 done
-                telegram_send "👥 Peers: ${total_peers} connected"
+                telegram_send "👥 Clients: ${total_peers} connected, ${total_cing} connecting"
                 ;;
             /uptime|/uptime@*)
                 local ut_msg="⏱ *Uptime Report*"
@@ -4669,7 +4675,7 @@ except Exception:
                     if echo "$docker_names" | grep -q "^${cname}$"; then
                         ct_msg+="C${i} (${cname}): 🟢 Running"
                         ct_msg+=$'\n'
-                        local logs=$(timeout 5 docker logs --tail 50 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
+                        local logs=$(timeout 5 docker logs --tail 400 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
                         if [ -n "$logs" ]; then
                             local c_cing c_conn c_up c_down
                             IFS='|' read -r c_cing c_conn c_up c_down <<< $(echo "$logs" | awk '{
@@ -4786,15 +4792,18 @@ build_report() {
         report+=$'\n'
     fi
 
-    # Peers
+    # Peers (connected + connecting, matching TUI format)
     local total_peers=0
+    local total_connecting=0
     for i in $(seq 1 ${CONTAINER_COUNT:-1}); do
         local cname=$(get_container_name $i)
-        local last_stat=$(docker logs --tail 50 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
+        local last_stat=$(docker logs --tail 400 "$cname" 2>&1 | grep "\[STATS\]" | tail -1)
         local peers=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connected:") print $(j+1)+0}}' | head -1)
+        local cing=$(echo "$last_stat" | awk '{for(j=1;j<=NF;j++){if($j=="Connecting:") print $(j+1)+0}}' | head -1)
         total_peers=$((total_peers + ${peers:-0}))
+        total_connecting=$((total_connecting + ${cing:-0}))
     done
-    report+="👥 Peers: ${total_peers} connected"
+    report+="👥 Clients: ${total_peers} connected, ${total_connecting} connecting"
     report+=$'\n'
 
     # Active unique clients
