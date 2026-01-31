@@ -834,8 +834,9 @@ EOF
 #═══════════════════════════════════════════════════════════════════════
 
 create_management_script() {
-    # Generate the management script. 
-    cat > "$INSTALL_DIR/conduit" << 'MANAGEMENT'
+    # Generate the management script (write to temp file first to avoid "Text file busy")
+    local tmp_script="$INSTALL_DIR/conduit.tmp.$$"
+    cat > "$tmp_script" << 'MANAGEMENT'
 #!/bin/bash
 #
 # Psiphon Conduit Manager
@@ -6380,9 +6381,14 @@ esac
 MANAGEMENT
 
     # Patch the INSTALL_DIR in the generated script
-    sed -i "s#REPLACE_ME_INSTALL_DIR#$INSTALL_DIR#g" "$INSTALL_DIR/conduit"
-    
-    chmod +x "$INSTALL_DIR/conduit"
+    sed -i "s#REPLACE_ME_INSTALL_DIR#$INSTALL_DIR#g" "$tmp_script"
+
+    chmod +x "$tmp_script"
+    if ! mv -f "$tmp_script" "$INSTALL_DIR/conduit"; then
+        rm -f "$tmp_script"
+        log_error "Failed to update management script"
+        return 1
+    fi
     # Force create symlink
     rm -f /usr/local/bin/conduit 2>/dev/null || true
     ln -s "$INSTALL_DIR/conduit" /usr/local/bin/conduit
